@@ -53,9 +53,11 @@ Replace Pinecone with pgvector on Supabase for vector search while maintaining F
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Sync Strategy: Firestore → Postgres (this is not implemented , as there is no firestore)
+### Sync Strategy: Firestore → Postgres
 
-**Approach:** Incremental daily sync using `updatedAt` timestamp.
+> **Note:** This sync pipeline is proposed architecture. Current implementation uses direct Supabase table (`products_search`) which was pre-populated from `productsV2`.
+
+**Proposed Approach:** Incremental daily sync using `updatedAt` timestamp.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -153,18 +155,22 @@ This separation achieves <300ms by keeping the database query simple and moving 
 
 ### 1. Embedding Model Selection
 
-**Decision: Voyage Multimodal-3 for both materials and products.**
+**Current: Voyage Multimodal-3.5 for both materials and products.**
 
-| Model | Strengths | Weaknesses | Decision |
-|-------|-----------|------------|----------|
-| **DINOv2** | Excellent texture/grain capture | Self-supervised (no semantic understanding), requires hosting | Considered(in progress) |
-| **Voyage Multimodal-3** | Multimodal (image+text), managed API, 1024-dim vectors | Cost (~$0.001/image) | **Selected** |
+| Model | Use Case | Status | Notes |
+|-------|----------|--------|-------|
+| **Voyage Multimodal-3.5** | Materials + Products | **Deployed** | Managed API, multimodal (image+text), 1024-dim vectors |
+| **DINOv2** | Materials (textures) | Under Evaluation | Better texture/grain capture; requires self-hosting |
+| **OpenAI CLIP** | Products (semantic) | Deferred | Voyage already provides semantic understanding with multimodal capability |
 
-**Rationale:**
-1. **Unified model** - One embedding space for materials AND products simplifies architecture
-2. **Multimodal capability** - Can incorporate metadata (name, supplier) into embedding for semantic boost
-3. **Managed API** - No GPU infrastructure to maintain
-4. **Proven quality** - Manual testing showed strong visual similarity for both textures and 3D objects
+**Why Voyage first:**
+1. **Managed API** - No GPU infrastructure needed; faster time-to-production
+2. **Unified model** - One embedding space for materials AND products simplifies architecture
+3. **Multimodal capability** - Can combine image + metadata (name, supplier) for richer embeddings
+
+**Planned evaluation:**
+- **DINOv2 for materials** - Self-supervised model excels at texture/grain details. Will benchmark against Voyage on material-specific queries to measure recall improvement.
+- **OpenAI CLIP** - Deprioritized. Voyage Multimodal already captures semantic style ("Industrial Lamp", "Mid-century Modern") while also supporting image+text fusion that CLIP lacks.
 
 **Embedding Strategy:**
 
@@ -172,13 +178,13 @@ This separation achieves <300ms by keeping the database query simple and moving 
 # For products WITH rich metadata:
 embedding = voyage.multimodal_embed(
     inputs=[[image, f"{name} by {supplier}. {description}"]],
-    model="voyage-multimodal-3"
+    model="voyage-multimodal-3.5"
 )
 
 # For products with minimal metadata:
 embedding = voyage.multimodal_embed(
     inputs=[[image]],
-    model="voyage-multimodal-3"
+    model="voyage-multimodal-3.5"
 )
 ```
 
@@ -215,22 +221,26 @@ WHERE "productType" = 'material'
 
 **Problem:** Nearest neighbors to "Beige Sofa" are "Black Sofa" and "Red Sofa" of the same model.
 
-**Solution: Post-Search Diversification (Client-Side)**
+**Solution: Two-Layer Deduplication**
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  DEDUPLICATION FLOW                                                      │
 ├──────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  1. OVER-FETCH                                                           │
+│  1. SQL LAYER: Exclude query product's variants                          │
+│     WHERE product_group_id != query_product_group_id                     │
+│     Prevents "House of Tweed" variants when querying "House of Tweed"    │
+│                                                                          │
+│  2. OVER-FETCH                                                           │
 │     Query top 24 neighbors (2x desired limit)                            │
 │     ~5ms with HNSW index                                                 │
 │                                                                          │
-│  2. CLIENT-SIDE DEDUPE (~1ms)                                            │
-│     Group by product_group_id                                            │
+│  3. CLIENT-SIDE DEDUPE (~1ms)                                            │
+│     Group OTHER products by product_group_id                             │
 │     Keep highest-scoring item per group                                  │
 │                                                                          │
-│  3. SLICE                                                                │
+│  4. SLICE                                                                │
 │     Return top 12 unique results                                         │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -278,27 +288,33 @@ LANGUAGE plpgsql
 AS $$
 DECLARE
     query_embedding vector(1024);
+    query_group_id VARCHAR;
 BEGIN
-    -- Pre-fetch embedding (avoids correlated subquery)
-    SELECT embedding_visual INTO query_embedding
-    FROM products_search WHERE id = query_id;
+    -- Pre-fetch embedding AND product_group_id for the query product
+    SELECT embedding_visual, ps.product_group_id 
+    INTO query_embedding, query_group_id
+    FROM products_search ps
+    WHERE ps.id = query_id;
 
     IF query_embedding IS NULL THEN
         RAISE EXCEPTION 'Product % has no embedding', query_id;
     END IF;
 
-    -- Simple HNSW query with filters
+    -- HNSW query with filters, excluding:
+    -- 1. The query product itself (by id)
+    -- 2. ALL variants of the query product (by product_group_id)
     RETURN QUERY
     SELECT
         ps.id,
         ps.name,
         ps."productType",
         ps.product_group_id,
-        ps."materialData"->'files'->>'color_original' AS image_url,
+        COALESCE(ps."materialData"->'files'->>'color_original', ps.mesh->>'rendered_image') AS image_url,
         1 - (ps.embedding_visual <=> query_embedding) AS similarity
     FROM products_search ps
     WHERE ps.embedding_visual IS NOT NULL
       AND ps.id != query_id
+      AND (query_group_id IS NULL OR ps.product_group_id IS NULL OR ps.product_group_id != query_group_id)
       AND ps."productType" = 'material'
       AND ps."objectStatus" IN ('APPROVED', 'APPROVED_PRO')
     ORDER BY ps.embedding_visual <=> query_embedding
@@ -308,9 +324,10 @@ $$;
 ```
 
 **Key Optimizations:**
-1. Pre-fetch query embedding into variable (not subquery)
-2. No SQL-side deduplication (moved to client)
-3. Partial index match via `WHERE` clause filters
+1. Pre-fetch query embedding AND `product_group_id` into variables
+2. Exclude entire product group of query (not just the query ID) - prevents variants from appearing
+3. No SQL-side deduplication for OTHER products (moved to client)
+4. Partial index match via `WHERE` clause filters
 
 ### 5. Two-Step Query Architecture
 
@@ -324,14 +341,15 @@ The similarity search is split into two distinct steps for optimal performance:
 │  What it does:                                                               │
 │  - Executes pure HNSW vector search on Postgres                              │
 │  - Returns top N nearest neighbors ordered by cosine similarity              │
-│  - NO deduplication (may contain color variants of same product)             │
+│  - Excludes query product AND all its variants (same product_group_id)       │
+│  - May still contain variants of OTHER products                              │
 │                                                                              │
-│  Why no dedup in SQL?                                                        │
-│  - SQL DISTINCT ON + CTEs added ~150ms latency                               │
-│  - HNSW index cannot be used efficiently with complex grouping               │
+│  Why minimal dedup in SQL?                                                   │
+│  - Only exclude query's product_group (simple WHERE clause)                  │
+│  - Full dedup via DISTINCT ON + CTEs added ~150ms latency                    │
 │  - Keeping the query simple = ~5ms execution time                            │
 │                                                                              │
-│  Output: Raw list with potential duplicates by product_group_id              │
+│  Output: Results excluding query variants, may have other product variants   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -364,11 +382,11 @@ response = supabase.rpc("search_similar_v4", {
     "query_id": "product-uuid",
     "match_cnt": 24  # Request 24, want 12 final
 })
-# Returns: 24 results, may include variants (e.g., 3 colors of same sofa)
+# Returns: 24 results (query variants already excluded, but OTHER products' variants may appear)
 
 # Step 2: Client-side dedupe
 unique_results = dedupe_by_product_group(response, limit=12)
-# Returns: 12 unique products, no color variants
+# Returns: 12 unique products, one per product_group_id
 ```
 
 ### 6. Latency Analysis
@@ -386,13 +404,13 @@ unique_results = dedupe_by_product_group(response, limit=12)
 ┌─────────────────────────────────────────────────────────┐
 │  LATENCY BREAKDOWN (Warm Request from US)               │
 ├─────────────────────────────────────────────────────────┤
-│  Network (TCP + SSL):           ~50ms                   │
-│  PostgREST overhead:            ~30ms                   │
+│  Network (TCP + SSL):           ~80ms                   │
+│  PostgREST overhead:            ~50ms                   │
 │  Database query (HNSW):          ~5ms   ← Raw SQL only  │
 │  Client-side dedup:              ~1ms   ← App layer     │
 │  Response transfer:             ~15ms                   │
 │  ─────────────────────────────────────────────────────  │
-│  TOTAL:                        ~100-150ms  ✅           │
+│  TOTAL:                        ~150-200ms  ✅           │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -413,7 +431,7 @@ unique_results = dedupe_by_product_group(response, limit=12)
 - Upgrade compute: Micro → Small (~$10/mo) reduces variance
 - Region proximity: Deploy Supabase closer to user base
 
-### 8. API Specification
+### 7. API Specification
 
 **Raw SQL RPC (Step 1):**
 
@@ -462,13 +480,13 @@ Response (RAW - may contain variants):
     "name": "Calacatta Gold Marble",
     "product_group_id": "group-xyz",
     "similarity": 0.94
-  },
-  // def456 removed - same product_group_id, lower score
-  ...
+  }
 ]
 ```
 
-### 9. Success Metrics
+Note: `def456` (Calacatta Gold Marble - Grey) is removed because it shares the same `product_group_id` but has a lower similarity score.
+
+### 8. Success Metrics
 
 **Validated by CTO testing from US location.**
 
@@ -477,7 +495,7 @@ Response (RAW - may contain variants):
 | Latency (US) | <300ms | **~150-200ms** ✅ | CTO tested via curl |
 | Latency (cached) | <100ms | **<50ms** ✅ | Streamlit cache |
 | Quality (no variants) | 80% relevant | ✅ | Client-side dedup by product_group_id |
-| Embedding coverage | >90% | **97%** (50,543 / 51,891) | Voyage Multimodal-3 |
+| Embedding coverage | >90% | **97%** (50,543 / 51,891) | Voyage Multimodal-3.5 |
 
 ---
 
@@ -528,3 +546,11 @@ mtbrd/
 ├── data/                           # Generated data (gitignored)
 └── requirements.txt
 ```
+
+---
+
+## Demo Screenshot
+
+![Streamlit Similarity Search Demo](data_readme/image.png)
+
+*Streamlit UI showing visual similarity search with client-side deduplication by product_group_id.*
