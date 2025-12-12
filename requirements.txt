@@ -1,0 +1,18 @@
+# Supabase client
+supabase==2.3.4
+
+# Voyage AI for embeddings
+voyageai==0.3.2
+
+# HTTP requests for image download
+requests==2.31.0
+
+# Image handling (optional, for validation)
+Pillow==10.2.0
+
+# UI for testing
+streamlit==1.29.0
+
+# Environment variables
+python-dotenv==1.0.0
+
