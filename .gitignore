@@ -10,9 +10,13 @@ data/
 # IDE
 .idea/
 .vscode/
+.cursor/
 
 # Logs
 *.log
 
 # OS
 .DS_Store
+
+# Checkpoints
+*checkpoint*.json

@@ -1,0 +1,151 @@
+# Fast fine-tuning config for Real-ESRGAN x2
+# Optimized for quick training (50k iterations instead of 400k)
+# Target: Complete in 2-3 hours on 1-4x A100
+
+name: RealESRGAN_x2plus_Topaz_fast
+model_type: RealESRGANModel
+scale: 2
+num_gpu: auto  # Will use all available GPUs
+manual_seed: 42
+
+# Dataset and dataloader settings
+datasets:
+  train:
+    name: TopazPBR_train
+    type: RealESRGANPairedDataset
+    dataroot_gt: datasets/topaz_train/hr_processed
+    dataroot_lq: datasets/topaz_train/lr_processed
+    meta_info: datasets/topaz_train/meta_info_topaz_train.txt
+    io_backend:
+      type: disk
+
+    gt_size: 512  # HR patch size (2x of LR which is 256)
+    use_hflip: true
+    use_rot: true
+
+    # Data loader
+    use_shuffle: true
+    num_worker_per_gpu: 6
+    batch_size_per_gpu: 8  # Adjust based on GPU memory
+    dataset_enlarge_ratio: 1
+    prefetch_mode: ~
+
+  val:
+    name: TopazPBR_val
+    type: RealESRGANPairedDataset
+    dataroot_gt: datasets/topaz_train/hr_processed
+    dataroot_lq: datasets/topaz_train/lr_processed
+    meta_info: datasets/topaz_train/meta_info_topaz_val.txt
+    io_backend:
+      type: disk
+
+# Network structures
+network_g:
+  type: RRDBNet
+  num_in_ch: 3
+  num_out_ch: 3
+  num_feat: 64
+  num_block: 23
+  num_grow_ch: 32
+  scale: 2
+
+network_d:
+  type: UNetDiscriminatorSN
+  num_in_ch: 3
+  num_feat: 64
+  skip_connection: true
+
+# Path
+path:
+  # Start from pretrained Real-ESRGAN x2 model
+  pretrain_network_g: experiments/pretrained_models/RealESRGAN_x2plus.pth
+  param_key_g: params_ema
+  strict_load_g: true
+  pretrain_network_d: ~
+  resume_state: ~
+
+# Training settings
+train:
+  ema_decay: 0.999
+  
+  optim_g:
+    type: Adam
+    lr: !!float 2e-4  # Slightly aggressive for fast convergence
+    weight_decay: 0
+    betas: [0.9, 0.99]
+  
+  optim_d:
+    type: Adam
+    lr: !!float 1e-4
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [25000, 40000]
+    gamma: 0.5
+
+  total_iter: 50000  # Fast training: 50k instead of 400k
+  warmup_iter: -1  # No warmup
+
+  # Losses
+  pixel_opt:
+    type: L1Loss
+    loss_weight: 1.0
+    reduction: mean
+
+  perceptual_opt:
+    type: PerceptualLoss
+    layer_weights:
+      'conv1_2': 0.1
+      'conv2_2': 0.1
+      'conv3_4': 1
+      'conv4_4': 1
+      'conv5_4': 1
+    vgg_type: vgg19
+    use_input_norm: true
+    perceptual_weight: !!float 1.0
+    style_weight: 0
+    range_norm: false
+    criterion: l1
+
+  gan_opt:
+    type: GANLoss
+    gan_type: vanilla
+    real_label_val: 1.0
+    fake_label_val: 0.0
+    loss_weight: !!float 1e-1
+
+  net_d_iters: 1
+  net_d_init_iters: 0
+
+# Validation settings
+val:
+  val_freq: !!float 5e3  # Validate every 5k iterations
+  save_img: true
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+
+# Logging settings
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 5e3  # Save every 5k iterations
+  use_tb_logger: true
+  wandb:
+    project: ~
+    resume_id: ~
+
+# Distributed training settings
+dist_params:
+  backend: nccl
+  port: 29500
+
+
