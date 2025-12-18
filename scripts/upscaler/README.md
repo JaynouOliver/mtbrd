@@ -1,73 +1,136 @@
-# Image Upscaler Training
+# PBR Material Image Upscaler
 
 Fine-tune Real-ESRGAN on Topaz-upscaled PBR material images.
 
-## Quick Start (Lambda Labs)
+**Goal:** Replace Topaz Labs API ($0.10/image) with self-hosted solution (<$0.01/image)
 
-```bash
-# 1. SSH into your Lambda instance
-ssh ubuntu@<your-lambda-ip>
+## Directory Structure
 
-# 2. Clone this repo
-git clone <your-repo-url>
-cd mtbrd/scripts/upscaler
-
-# 3. Set Supabase key
-export SUPABASE_KEY="your-supabase-anon-key"
-
-# 4. Run everything
-chmod +x setup_and_train.sh
-./setup_and_train.sh
+```
+scripts/upscaler/
+  - training/           # All training scripts (one-shot setup)
+    - README.md         # Detailed training guide
+    - setup_instance.sh # Environment setup
+    - download_data.py  # Download from Supabase
+    - preprocess.py     # Create training patches
+    - run_training.sh   # Start training
+    - check_training.sh # Monitor progress
+    - benchmark.py      # Evaluate model
+    - finetune_topaz_esrgan.yml  # Training config
+  - inference.py        # Run inference
+  - evaluate_model.py   # Full evaluation suite
+  - requirements.txt    # Python dependencies
 ```
 
-## Manual Step-by-Step
+## Quick Start (Lambda H100)
+
+### Option 1: One-Shot Setup
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# 1. SSH to Lambda instance
+ssh -i ~/.ssh/lightning_rsa ubuntu@<instance-ip>
 
-# Download training data (10k images)
-python download_training_data.py --limit 10000 --workers 50
+# 2. Copy training files from local
+scp -i ~/.ssh/lightning_rsa -r scripts/upscaler/training ubuntu@<instance-ip>:~/
 
-# Preprocess data
-python preprocess_data.py
+# 3. Run setup (creates venv, installs deps, downloads models)
+chmod +x ~/training/*.sh
+./training/setup_instance.sh
 
-# Start training
-cd Real-ESRGAN
-python realesrgan/train.py -opt options/finetune_realesrgan_x2_fast.yml --auto_resume
+# 4. Configure credentials
+cat > ~/.env << 'EOF'
+SUPABASE_URL=https://glfevldtqujajsalahxd.supabase.co
+SUPABASE_KEY=your_key_here
+EOF
+source ~/.env && export SUPABASE_KEY
+
+# 5. Download and preprocess data
+source ~/upscaler_env/bin/activate
+python ~/training/download_data.py --limit 40000
+python ~/training/preprocess.py
+
+# 6. Start training
+./training/run_training.sh
+
+# 7. Monitor
+./training/check_training.sh
 ```
 
-## Test Inference
+### Option 2: Docker (Alternative)
 
 ```bash
-python test_inference.py -i test_images/ -o results/
+docker run --rm --gpus all \
+    -v /home/ubuntu/upscaler/datasets:/data \
+    subhro2084/realesrgan-trainer \
+    python -u realesrgan/train.py -opt /app/config.yml
 ```
 
-## Files
+## Training Results (Dec 2024)
 
-| File | Description |
-|------|-------------|
-| `setup_and_train.sh` | One-command setup and training |
-| `download_training_data.py` | Downloads LR/HR pairs from Supabase |
-| `preprocess_data.py` | Prepares data for training |
-| `finetune_realesrgan_x2_fast.yml` | Training config (50k iterations) |
-| `test_inference.py` | Test the trained model |
-| `FAST_TRACK_PLAN.md` | Detailed plan and timeline |
+Training with ~18K patches from 20K image pairs:
 
-## Expected Timeline
+| Iteration | PSNR | SSIM | Notes |
+|-----------|------|------|-------|
+| Pretrained (baseline) | 21.45 dB | 0.418 | No finetuning |
+| 5,000 | 22.16 dB | 0.501 | +0.71 dB improvement |
+| 10,000 | 22.17 dB | 0.507 | Plateau begins |
+| 15,000 | 22.18 dB | 0.510 | Marginal gains |
+| 20,000 | 22.18 dB | 0.510 | Stopped here |
 
-| Phase | Duration |
-|-------|----------|
-| Setup | 15 min |
-| Download 10k images | 1-1.5 hrs |
-| Preprocess | 30 min |
-| Training (1x A100) | 3-4 hrs |
-| Training (4x A100) | 1-1.5 hrs |
-| **Total** | **4-6 hrs** |
+**Key Finding:** With limited data (18K patches), the model plateaus early. To achieve PSNR > 28 dB and SSIM > 0.85, use 100K+ patches.
 
-## Cost
+## Quality Targets
 
-- Lambda A100 80GB: $1.79/hr
-- Total training cost: ~$10-20
+| Metric | Current | Minimum | Target |
+|--------|---------|---------|--------|
+| SSIM | 0.51 | >= 0.88 | >= 0.92 |
+| PSNR | 22.2 dB | >= 28 dB | >= 30 dB |
+| LPIPS | TBD | <= 0.12 | <= 0.08 |
 
+## Cost Analysis
 
+| Item | Cost |
+|------|------|
+| H100 training (~5 hrs) | ~$12-15 |
+| Inference per image | ~$0.001-0.002 |
+| **Savings for 100K images** | **~$9,800** |
+
+## Inference
+
+```bash
+# Single image
+python inference.py -i input.jpg -o output.jpg
+
+# Folder of images
+python inference.py -i input_folder/ -o output_folder/
+
+# With custom model
+python inference.py -i input.jpg -o output.jpg \
+    --model path/to/checkpoint.pth
+```
+
+## Checkpoints
+
+Best checkpoint from training: `net_g_20000.pth` (134MB)
+
+Download from instance:
+```bash
+scp -i ~/.ssh/lightning_rsa \
+    ubuntu@<instance>:~/Real-ESRGAN/experiments/RealESRGAN_x2_Topaz/models/net_g_20000.pth \
+    ./models/
+```
+
+## Lessons Learned
+
+1. **Data quantity matters**: 18K patches insufficient; need 100K+ for quality gains
+2. **Domain gap**: Topaz uses proprietary algorithms; Real-ESRGAN style differs
+3. **Diminishing returns**: After ~5K iterations with limited data, improvements plateau
+4. **Discriminator mismatch**: Using 4x discriminator with 2x model may cause instability
+
+## Future Improvements
+
+1. Download full 40K images, extract 4-8 crops each (~200K patches)
+2. Train for 200K+ iterations
+3. Try SwinIR or HAT architectures
+4. Add LPIPS loss during training
+5. Consider training from scratch for this specific domain

@@ -17,25 +17,45 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 API_KEY = os.getenv("SUPABASE_ANON_KEY")
 
-if not SUPABASE_URL or not API_KEY:
-    st.error("Missing environment variables: SUPABASE_URL and SUPABASE_ANON_KEY must be set in .env file")
+# Optional: use local backend for low-latency tests (e.g., http://localhost:8010)
+LOCAL_API_URL = os.getenv("LOCAL_API_URL")  # if set, use this instead of Supabase REST
+
+if not LOCAL_API_URL and (not SUPABASE_URL or not API_KEY):
+    st.error("Missing environment variables: set LOCAL_API_URL for local backend, or SUPABASE_URL and SUPABASE_ANON_KEY for Supabase")
     st.stop()
 
-# Sample MATERIAL products
-SAMPLE_PRODUCTS = [
-    {"id": "6a9f9346-5e0c-4011-ba52-d3d95975ad05", "name": "White Carrara Marble", "supplier": "MSI Surfaces", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-6a9f9346-5e0c-4011-ba52-d3d95975ad05_color_original_e1569a96-7b9b-4892-965e-6302c74d556c.jpg"},
-    {"id": "b474d07068cd48728308bcf0d3fbe386", "name": "Arabescato Marble", "supplier": "Cosentino", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-b474d07068cd48728308bcf0d3fbe386_color_original_268764fa-6344-4b6d-91d0-eaff3accd3c2.jpg"},
-    {"id": "fdb1c6f2-bb8a-4ed1-a99c-bfb175299958", "name": "Wallowa Pine Wood", "supplier": "Arauco", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-fdb1c6f2-bb8a-4ed1-a99c-bfb175299958_color_original_628a0c7c-9356-4246-8fda-e7f00a90f6a4.jpg"},
-    {"id": "7ca456d0-7f8d-49fa-88f0-307bb82a4858", "name": "Step by Step Carpet", "supplier": "J+J Flooring", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-7ca456d0-7f8d-49fa-88f0-307bb82a4858_color_original_ad29b924-de0b-4e5d-8df0-e9621360f08c.jpg"},
-    {"id": "Material-3ipz40jcjp", "name": "Waterfall Succulent", "supplier": "Drop It Modern", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-3ipz40jcjp/color.jpg"},
-    {"id": "Material-04389", "name": "Hallingdal Fabric", "supplier": "Kvadrat", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-r93axeycwf/Material-r93axeycwf_color.jpg"},
-    {"id": "03037d26-6abe-4798-9f60-e040a4db4a61", "name": "Levine Rug", "supplier": "Stark", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-03037d26-6abe-4798-9f60-e040a4db4a61_color_original_d0c68cf6-5a15-49d6-8aa5-cfabc30180a0.jpg"},
-    {"id": "ee6c7142-c12f-4bca-9a24-1ae7281b42af", "name": "Luxurious Wallcovering", "supplier": "Koroseal", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-ee6c7142-c12f-4bca-9a24-1ae7281b42af_color_original_4020ee98-e3e7-4e81-af39-be374c7d2812.jpg"},
-    {"id": "ef806014-1132-47fc-a511-bf5116e17275", "name": "Rosegold Glyph Tile", "supplier": "Florim", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-ef806014-1132-47fc-a511-bf5116e17275_color_original_28b6e7ca-3023-4f2e-ad16-a66c2536e640.jpg"},
-    {"id": "Material-00200", "name": "Schwarzwald Verdure", "supplier": "Dedar", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-00200/0faognlurj_color.jpg"},
-    {"id": "15766709-9d0f-4796-88bd-81ed1fe9d43a", "name": "House of Tweed", "supplier": "Koroseal", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-15766709-9d0f-4796-88bd-81ed1fe9d43a_color_original_39c020c0-6fae-4658-be30-545a84582369.jpg"},
-    {"id": "Material-00303", "name": "Terracotta Tile", "supplier": "Tile", "image": "https://storage.googleapis.com/mattoboard-b8284.appspot.com/gltf-materials/Material-00303/n5ncrcyv1f_color.jpg"},
-]
+# CSV-driven product pool (load from CSV, no images needed for selection)
+CSV_PATH = os.getenv("PRODUCT_CSV_PATH", "Supabase Snippet Product Image Metadata Extract.csv")
+
+def load_all_products_from_csv(csv_path: str) -> list:
+    """Load all product ids/names from CSV."""
+    import csv
+    products = []
+    try:
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                pid = row.get("id")
+                name = row.get("name") or pid
+                if pid:
+                    products.append({"id": pid, "name": name})
+    except Exception as e:
+        st.warning(f"Could not load CSV: {e}")
+        products = []
+    return products
+
+# Load all products once at startup
+ALL_PRODUCTS = load_all_products_from_csv(CSV_PATH)
+
+def get_random_sample(products: list, n: int, seed: float) -> list:
+    """Get n random unique products using seed for reproducibility."""
+    import random
+    rng = random.Random(seed)
+    if len(products) <= n:
+        items = products[:]
+        rng.shuffle(items)
+        return items
+    return rng.sample(products, n)
 
 # Model configurations
 MODELS = {
@@ -84,11 +104,12 @@ st.markdown("""
 def get_session():
     """Reusable session with connection pooling."""
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {API_KEY}",
-        "apikey": API_KEY,
-        "Content-Type": "application/json"
-    })
+    if not LOCAL_API_URL:
+        session.headers.update({
+            "Authorization": f"Bearer {API_KEY}",
+            "apikey": API_KEY,
+            "Content-Type": "application/json"
+        })
     return session
 
 
@@ -129,7 +150,7 @@ def fetch_product_details_cached(product_id: str) -> Optional[dict]:
         return None
 
 
-def fetch_similar_materials(product_id: str, model: str, limit: int = 12) -> tuple:
+def fetch_similar_materials(product_id: str, model: str, limit: int = 10) -> tuple:
     """
     Fetch similar materials using specified model.
     Returns (data, latency_ms, error_msg)
@@ -141,47 +162,61 @@ def fetch_similar_materials(product_id: str, model: str, limit: int = 12) -> tup
     rpc_name = model_config["rpc"]
     
     try:
-        over_fetch_count = limit * 2
-        
-        response = session.post(
-            f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}",
-            json={"query_id": product_id, "match_cnt": over_fetch_count},
-            timeout=12
-        )
-        
-        api_latency = (time.time() - start) * 1000
-        
-        if response.status_code == 200:
-            results = response.json()
-            
-            # Client-side deduplication
-            dedup_start = time.time()
-            unique_results = dedupe_by_product_group(results, limit)
-            dedup_time = (time.time() - dedup_start) * 1000
-            
-            total_latency = api_latency + dedup_time
-            
-            data = {
-                "data": [
-                    {
-                        "id": r["id"],
-                        "name": r["name"],
-                        "product_type": r["product_type"],
-                        "product_group_id": r.get("product_group_id"),
-                        "thumbnail_url": r["image_url"],
-                        "similarity_score": r["similarity"]
-                    }
-                    for r in unique_results if r.get("image_url")
-                ],
-                "count": len(unique_results),
-                "api_latency": api_latency,
-                "dedup_time": dedup_time,
-                "model": model
-            }
-            return data, total_latency, None
+        # Over-fetch 100 neighbors per CTO spec to handle variant problem
+        # After dedup by product_group_id, we return `limit` unique results
+        over_fetch_count = max(100, limit * 10)
+
+        if LOCAL_API_URL:
+            # Local backend (GET with query params)
+            endpoint = "voyage" if model == "voyage" else "dinov2"
+            resp = session.get(
+                f"{LOCAL_API_URL}/{endpoint}",
+                params={"query_id": product_id, "limit": over_fetch_count},
+                timeout=8,
+            )
+            api_latency = (time.time() - start) * 1000
+            if resp.status_code != 200:
+                return None, api_latency, f"Local API Error {resp.status_code}: {resp.text[:200]}"
+            payload = resp.json()
+            results = payload.get("results", [])
+            api_latency = payload.get("benchmark_ms", api_latency)
         else:
-            error_text = response.text[:200]
-            return None, api_latency, f"API Error {response.status_code}: {error_text}"
+            # Supabase REST RPC
+            resp = session.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/{rpc_name}",
+                json={"query_id": product_id, "match_cnt": over_fetch_count},
+                timeout=12
+            )
+            api_latency = (time.time() - start) * 1000
+            if resp.status_code != 200:
+                return None, api_latency, f"API Error {resp.status_code}: {resp.text[:200]}"
+            results = resp.json()
+
+        # Client-side deduplication
+        dedup_start = time.time()
+        unique_results = dedupe_by_product_group(results, limit)
+        dedup_time = (time.time() - dedup_start) * 1000
+
+        total_latency = api_latency + dedup_time
+
+        data = {
+            "data": [
+                {
+                    "id": r["id"],
+                    "name": r["name"],
+                    "product_type": r["product_type"],
+                    "product_group_id": r.get("product_group_id"),
+                    "thumbnail_url": r.get("image_url"),
+                    "similarity_score": r.get("similarity")
+                }
+                for r in unique_results if r.get("image_url")
+            ],
+            "count": len(unique_results),
+            "api_latency": api_latency,
+            "dedup_time": dedup_time,
+            "model": model
+        }
+        return data, total_latency, None
     except Exception as e:
         latency = (time.time() - start) * 1000
         return None, latency, str(e)
@@ -243,16 +278,41 @@ with col_btn:
 
 st.markdown("---")
 
-# Sample Materials Grid
+# Sample Materials List (no images, random 20 from CSV)
 st.subheader("Or Select a Sample Material")
-cols = st.columns(4)
-for i, product in enumerate(SAMPLE_PRODUCTS):
-    with cols[i % 4]:
-        st.image(product["image"], width="stretch")
-        st.markdown(f"**{product['name'][:22]}**")
-        st.markdown(f"<span class='supplier-text'>{product['supplier']}</span>", unsafe_allow_html=True)
-        if st.button("Select", key=f"btn_{product['id']}", width="stretch"):
-            st.session_state.selected_product = product
+
+# Initialize shuffle seed if not present
+if "sample_seed" not in st.session_state:
+    import time as _time
+    st.session_state.sample_seed = _time.time()
+
+# Reshuffle button
+if st.button("Reshuffle Product IDs"):
+    import time as _time
+    st.session_state.sample_seed = _time.time()
+    st.rerun()
+
+# Get 20 random products based on current seed
+sample_products = get_random_sample(ALL_PRODUCTS, 20, st.session_state.sample_seed)
+
+if not sample_products:
+    st.warning("No products found in CSV. Check the file path.")
+else:
+    # Display as a simple list (no images)
+    for product in sample_products:
+        cols_row = st.columns([4, 1])
+        with cols_row[0]:
+            st.markdown(f"**{product['name'][:50]}**")
+            st.caption(f"ID: `{product['id']}`")
+        with cols_row[1]:
+            if st.button("Select", key=f"btn_{product['id']}"):
+                st.session_state.selected_product = {
+                    "id": product["id"],
+                    "name": product["name"],
+                    "supplier": "CSV",
+                    "image": None  # No image in selection, will show in results
+                }
+                st.rerun()
 
 # Results Section
 if "selected_product" in st.session_state:

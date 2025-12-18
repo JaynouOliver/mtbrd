@@ -678,3 +678,6 @@ mtbrd/
 **Document Version:** 2.0  
 **Last Updated:** December 2024  
 **Validated By:** CTO (George) - US server testing confirmed <300ms target achieved
+
+
+one exception from this product ID 00832853-a744-407c-b099-6a25e75bf5a1 maybe due to insufficient embeddings.
