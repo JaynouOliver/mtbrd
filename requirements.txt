@@ -10,9 +10,20 @@ requests==2.31.0
 # Image handling (optional, for validation)
 Pillow==10.2.0
 
+# COCO RLE mask decoding for SAM3
+pycocotools
+
 # UI for testing
 streamlit==1.29.0
 
 # Environment variables
 python-dotenv==1.0.0
 
+# SDK for inference
+inference-sdk
+
+torch
+torchvision --index-url https://download.pytorch.org/whl/cpu
+transformers 
+pillow 
+requests

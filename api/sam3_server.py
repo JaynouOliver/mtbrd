@@ -1,40 +1,26 @@
+from sam3_segments import sam3_segment_image, process_segments_and_save, embed_segment_images
+
+import requests
+import os
+from urllib.parse import urlparse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, List
+from contextlib import asynccontextmanager
 import psycopg2
+from psycopg2 import pool
 from dotenv import load_dotenv
+import sys
 import os
 
-# Load environment variables from .env
 load_dotenv()
 
-def get_db_connection():
-    """
-    Establish and return a PostgreSQL database connection using environment variables.
-
-    Returns:
-        psycopg2.extensions.connection: Database connection object.
-    Raises:
-        Exception: If the connection could not be established.
-    """
-    USER = os.getenv("user")
-    PASSWORD = os.getenv("password")
-    HOST = os.getenv("host")
-    PORT = os.getenv("port")
-    DBNAME = os.getenv("dbname")
-
-    try:
-        connection = psycopg2.connect(
-            user=USER,
-            password=PASSWORD,
-            host=HOST,
-            port=PORT,
-            dbname=DBNAME
-        )
-        return connection
-    except Exception as e:
-        print(f"Failed to connect: {e}")
-        raise
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from database.Direct_connection import search_by_voyage_embedding
 
 
-embedding = [-0.03112793, 0.02746582, 0.046875, -0.000141144, -0.022949219, -0.003570557, 0.013671875, 0.045898438, 0.040283203, 
+mock_embedding = [-0.03112793, 0.02746582, 0.046875, -0.000141144, -0.022949219, -0.003570557, 0.013671875, 0.045898438, 0.040283203, 
 -0.012207031, -0.022216797, 0.008422852, 0.014282227, -0.008178711, 0.021362305, -0.001464844, 0.04711914, -0.012329102, 
 -0.032714844, -0.035888672, -0.007995605, 0.007598877, 0.003128052, 0.06225586, -0.076660156, 0.03112793, 0.018798828, -0.03564453, 
 -0.022705078, 0.011352539, 0.10888672, 0.046875, -0.04663086, -0.053222656, -0.00176239, 0.024658203, 0.045898438, 0.0234375, 
@@ -140,117 +126,216 @@ embedding = [-0.03112793, 0.02746582, 0.046875, -0.000141144, -0.022949219, -0.0
 -0.05883789, 0.014770508, -0.018920898, -0.007415771, 0.03466797, -0.024414062, -0.011352539, -0.014099121, 0.03112793, 0.056152344, 
 -0.04663086, 0.018554688, 0.01361084]
 
+def download_image_from_url(url: str, save_dir: str = "images_from_url") -> str:
+    """
+    Downloads an image from the specified URL and saves it to the given directory.
+    Uses the file name as given in the URL.
+    Returns the path to the saved image file.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    parsed = urlparse(url)
+    file_name = os.path.basename(parsed.path)
+    image_path = os.path.join(save_dir, file_name)
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    with open(image_path, "wb") as f:
+        for chunk in response.iter_content(1024):
+            f.write(chunk)
+    return image_path 
 
-def search_by_voyage_embedding(
-    query_embedding: list,
-    limit: int = 10,
-    similarity_threshold: float = 0.7,
-    application: str = None,
-    region_served: list = None,
-    relative_price: int = None,
-    sustainability_and_health: list = None
-):
+
+
+def segment_image(image_url: str):
+    """
+    Downloads image from URL, segments it, and generates embeddings for each segment.
+    
+    Returns:
+        List of embeddings (one for each segment)
+    """
+    downloaded_path = download_image_from_url(image_url)
+    result = sam3_segment_image(downloaded_path)
+    saved_paths = process_segments_and_save(result, downloaded_path)
+    print(f"Saved {len(saved_paths)} segment images:")
+    for path in saved_paths:
+        print(f"  - {path}")
+    embeddings = embed_segment_images(saved_paths)
+    print(f"Generated {len(embeddings)} embeddings, each with {len(embeddings[0]) if embeddings else 0} dimensions")
+    return embeddings
+
+
+connection_pool = None
+
+
+def get_connection_pool():
+    global connection_pool
+    if connection_pool is None:
+        USER = os.getenv("user")
+        PASSWORD = os.getenv("password")
+        HOST = os.getenv("host")
+        PORT = os.getenv("port")
+        DBNAME = os.getenv("dbname")
+        
+        connection_pool = pool.ThreadedConnectionPool(
+            minconn=2,
+            maxconn=76,
+            user=USER,
+            password=PASSWORD,
+            host=HOST,
+            port=PORT,
+            dbname=DBNAME
+        )
+        print(f"Connection pool initialized: minconn=2, maxconn=76")
+    return connection_pool
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    get_connection_pool()
+    yield
+    if connection_pool:
+        connection_pool.closeall()
+        print("Connection pool closed")
+
+
+app = FastAPI(
+    title="SAM3 Segmentation & Vector Search API",
+    description="API for image segmentation and vector similarity search",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+class SearchRequest(BaseModel):
+    query_embedding: List[float]
+    limit: Optional[int] = 10
+    similarity_threshold: Optional[float] = 0.7
+    application: Optional[str] = None
+    region_served: Optional[List[str]] = None
+    relative_price: Optional[int] = None
+    sustainability_and_health: Optional[List[str]] = None
+
+
+class ImageSearchRequest(BaseModel):
+    image_url: str
+    limit: Optional[int] = 10
+    similarity_threshold: Optional[float] = 0.7
+    application: Optional[str] = None
+    region_served: Optional[List[str]] = None
+    relative_price: Optional[int] = None
+    sustainability_and_health: Optional[List[str]] = None
+
+
+class SearchResponse(BaseModel):
+    count: int
+    results: List[dict]
+
+
+class ImageSearchResponse(BaseModel):
+    segments_processed: int
+    segment_results: List[dict]
+
+
+@app.get("/")
+async def root():
+    return {"message": "SAM3 Segmentation & Vector Search API", "status": "running"}
+
+
+@app.post("/search/voyage", response_model=SearchResponse)
+async def search_voyage_embedding(request: SearchRequest):
     """
     Search for similar products using a Voyage embedding vector.
     
-    Returns only the essential fields: ID, similarity score, and thumbnail URL.
-    
-    Args:
-        query_embedding: 1024-dimensional Voyage embedding vector (list of floats)
-        limit: Maximum number of results to return (default: 10)
-        similarity_threshold: Minimum similarity score (0.0-1.0, default: 0.7)
-                          where 1.0 is identical and 0.0 is completely different
-        application: Optional filter for metadata.application (e.g., "Walls", "Upholstery", "Floors")
-        region_served: Optional filter for metadata.regionServed (list of strings, e.g., ["USCA", "WEUR"])
-        relative_price: Optional filter for metadata.relativePrice (integer 1-5)
-        sustainability_and_health: Optional filter for metadata.sustainabilityAndHealth 
-                                  (list of strings, e.g., ["LEED Contributing", "Sustainability Certified"])
-    
-    Returns:
-        List of dictionaries with three keys:
-        - id: Product ID (string)
-        - similarity: Cosine similarity score (float, 0.0-1.0)
-        - thumbnail_url: Thumbnail image URL (string or None)
+    Uses the connection pool for optimal performance.
     """
-    connection = None
     try:
-        connection = get_db_connection()
-        cursor = connection.cursor()
+        results = search_by_voyage_embedding(
+            query_embedding=request.query_embedding,
+            limit=request.limit,
+            similarity_threshold=request.similarity_threshold,
+            application=request.application,
+            region_served=request.region_served,
+            relative_price=request.relative_price,
+            sustainability_and_health=request.sustainability_and_health
+        )
+        return SearchResponse(count=len(results), results=results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/search/image", response_model=ImageSearchResponse)
+async def search_by_image_url(request: ImageSearchRequest):
+    """
+    Search for similar products by processing an image URL.
+    
+    Flow:
+    1. Download image from URL
+    2. Segment the image using SAM3
+    3. Generate Voyage embeddings for each segment
+    4. Search for similar products using each embedding
+    5. Return results for all segments
+    """
+    try:
+        embeddings = segment_image(request.image_url)
         
-        embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+        if not embeddings:
+            raise HTTPException(status_code=400, detail="No segments found in image")
         
-        query = """
-            SELECT 
-                id,
-                1 - (embedding_visual <=> %s::vector(1024)) as similarity,
-                COALESCE(
-                    "materialData"->'files'->>'color_original',
-                    mesh->>'rendered_image'
-                ) as thumbnail_url
-            FROM products_search
-            WHERE 
-                embedding_visual IS NOT NULL
-                AND "objectStatus" IN ('APPROVED', 'APPROVED_PRO')
-                AND 1 - (embedding_visual <=> %s::vector(1024)) >= %s
-        """
-        
-        params = [embedding_str, embedding_str, similarity_threshold]
-        
-        if application is not None:
-            query += " AND metadata->'application' @> to_jsonb(ARRAY[%s]::text[])"
-            params.append(application)
-        
-        if region_served is not None:
-            query += " AND metadata->'regionServed' ?| %s"
-            params.append(region_served)
-        
-        if relative_price is not None:
-            query += " AND (metadata->>'relativePrice')::int = %s"
-            params.append(relative_price)
-        
-        if sustainability_and_health is not None:
-            query += " AND metadata->'sustainabilityAndHealth' @> to_jsonb(%s)"
-            params.append(sustainability_and_health)
-        
-        query += """
-            ORDER BY embedding_visual <=> %s::vector(1024)
-            LIMIT %s
-        """
-        params.extend([embedding_str, limit])
-        
-        cursor.execute(query, params)
-        results = cursor.fetchall()
-        
-        products = []
-        for row in results:
-            products.append({
-                'id': row[0],
-                'similarity': round(float(row[1]), 4),
-                'thumbnail_url': row[2]
+        segment_results = []
+        for idx, embedding in enumerate(embeddings):
+            results = search_by_voyage_embedding(
+                query_embedding=embedding,
+                limit=request.limit,
+                similarity_threshold=request.similarity_threshold,
+                application=request.application,
+                region_served=request.region_served,
+                relative_price=request.relative_price,
+                sustainability_and_health=request.sustainability_and_health
+            )
+            segment_results.append({
+                "segment_index": idx,
+                "embedding_dimensions": len(embedding),
+                "count": len(results),
+                "results": results
             })
         
-        return products
-        
+        return ImageSearchResponse(
+            segments_processed=len(embeddings),
+            segment_results=segment_results
+        )
     except Exception as e:
-        print(f"Error performing vector search: {e}")
-        raise
-    finally:
-        if connection:
-            cursor.close()
-            connection.close()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/search/voyage/test")
+async def test_search():
+    """
+    Test endpoint using the mock embedding from this file.
+    """
+    try:
+        results = search_by_voyage_embedding(
+            query_embedding=mock_embedding,
+            limit=10,
+            similarity_threshold=0.7
+        )
+        return {
+            "message": "Test search successful",
+            "embedding_dimensions": len(mock_embedding),
+            "count": len(results),
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
-    results = search_by_voyage_embedding(
-        embedding,
-        limit=100,
-        similarity_threshold=0.7,
-        # Optional filters - uncomment to use:
-        # application="Walls",
-        # region_served=["USCA", "WEUR"],
-        # relative_price=4,
-        # sustainability_and_health=["LEED Contributing", "Sustainability Certified"]
-    )
-    print(f"Found {len(results)} similar products:")
-    for product in results:
-        print(f"  - ID: {product['id']}, Similarity: {product['similarity']:.4f}, Thumbnail: {product['thumbnail_url']}")
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+

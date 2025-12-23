@@ -21,3 +21,13 @@ data/
 # Checkpoints
 *checkpoint*.json
 scripts/upscaler/models/
+output_segments/
+benchmark_results/comparisons/
+models/checkpoints/
+api/sam3_segments
+training_configs
+benchmark_results
+DOWNLOADED_FILES_README.md
+scripts/upscaler/
+images_from_url/
+models/
