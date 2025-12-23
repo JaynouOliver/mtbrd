@@ -220,10 +220,13 @@ def segment_and_process_image(
 
 def embed_segment_images(
     image_paths: Union[str, List[str]],
-    context_text: str = "This is a room interior.",
+    context_text: str = None,
 ) -> Union[List[float], List[List[float]]]:
     """
     Given one or more image paths, return Voyage embeddings.
+    
+    Embeds images only (no text) to match database embedding format.
+    Uses input_type="document" to match database embeddings.
 
     - If a single path (str) is passed, returns a single embedding list.
     - If a list of paths is passed, returns a list of embedding lists.
@@ -231,7 +234,8 @@ def embed_segment_images(
     is_single = isinstance(image_paths, str)
     paths: List[str] = [image_paths] if is_single else image_paths
 
-    embeddings = [embed_image_path(p, context_text) for p in paths]
+    # Pass None to embed_image_path to embed image only (no text)
+    embeddings = [embed_image_path(p, context_text=None) for p in paths]
     return embeddings[0] if is_single else embeddings
 
 
